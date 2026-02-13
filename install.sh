@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="${HUSYNC_REPO:-YOUR_USERNAME/husync}"
+REPO="${HUSYNC_REPO:-xu-shi-jie/husync}"
 VERSION="${HUSYNC_VERSION:-latest}"
 INSTALL_DIR="${HUSYNC_INSTALL_DIR:-}"
 

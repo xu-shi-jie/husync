@@ -9,6 +9,18 @@ Real-time directory sync tool written in Rust. Watches local directories and aut
 - Initial sync on startup (root files + watched directories)
 - Remote sync using rsync with SSH key
 
+## Install
+
+Install latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xu-shi-jie/husync/master/install.sh | sh
+```
+
+Optional environment variables:
+- `HUSYNC_VERSION` (default: `latest`)
+- `HUSYNC_INSTALL_DIR` (default: `/usr/local/bin` or `~/.local/bin`)
+
 ## Build
 
 ```bash
