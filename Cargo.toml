@@ -1,0 +1,19 @@
+[package]
+name = "husync"
+version = "0.0.5"
+edition = "2021"
+authors = ["husync contributors"]
+description = "Real-time directory sync tool with file watching and colored output"
+license = "MIT"
+repository = "https://github.com/YOUR_USERNAME/husync"
+homepage = "https://github.com/YOUR_USERNAME/husync"
+keywords = ["sync", "rsync", "file-watcher", "remote-sync", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+readme = "README.md"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+ctrlc = "3"
+notify = "6"
+wait-timeout = "0.2"

@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            bin_path: target/x86_64-unknown-linux-musl/release/husync
+            archive: husync-Linux-x86_64.tar.gz
+            archive_type: tar
+          - name: macOS-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            bin_path: target/x86_64-apple-darwin/release/husync
+            archive: husync-macOS-x86_64.tar.gz
+            archive_type: tar
+          - name: Windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_path: target/x86_64-pc-windows-msvc/release/husync.exe
+            archive: husync-Windows-x86_64.zip
+            archive_type: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (unix)
+        if: matrix.archive_type == 'tar'
+        run: |
+          mkdir -p dist
+          cp ${{ matrix.bin_path }} dist/husync
+          tar -czf ${{ matrix.archive }} -C dist husync
+
+      - name: Prepare artifact (windows)
+        if: matrix.archive_type == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item ${{ matrix.bin_path }} dist/husync.exe
+          Compress-Archive -Path dist/husync.exe -DestinationPath ${{ matrix.archive }} -Force
+
+      - name: Upload CI artifact (unix)
+        if: matrix.archive_type == 'tar'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+
+      - name: Upload CI artifact (windows)
+        if: matrix.archive_type == 'zip'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+
+      - name: Upload release asset (unix)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.archive_type == 'tar'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive }}
+
+      - name: Upload release asset (windows)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.archive_type == 'zip'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive }}
