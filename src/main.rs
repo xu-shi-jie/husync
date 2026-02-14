@@ -1,7 +1,9 @@
 use clap::Parser;
 use colored::*;
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,6 +12,69 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedConfig {
+    directories: Vec<String>,
+    remote_user: String,
+    remote_host: String,
+    remote_base: String,
+    debounce: f64,
+    ssh_key: String,
+    verbose: bool,
+}
+
+impl SavedConfig {
+    fn config_file_path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".husync")
+    }
+
+    fn load_all() -> Result<Vec<Self>, String> {
+        let path = Self::config_file_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read config: {}", e))?;
+        let configs: Vec<Self> = serde_json::from_str(&content)
+            .map_err(|e| format!("failed to parse config: {}", e))?;
+        Ok(configs)
+    }
+
+    fn save(&self) -> Result<(), String> {
+        let mut configs = Self::load_all().unwrap_or_default();
+        
+        // Check if this config already exists
+        if !configs.iter().any(|c| {
+            c.directories == self.directories
+                && c.remote_user == self.remote_user
+                && c.remote_host == self.remote_host
+                && c.remote_base == self.remote_base
+        }) {
+            configs.push(self.clone());
+        }
+        
+        let path = Self::config_file_path();
+        let content = serde_json::to_string_pretty(&configs)
+            .map_err(|e| format!("failed to serialize config: {}", e))?;
+        fs::write(&path, content)
+            .map_err(|e| format!("failed to write config: {}", e))?;
+        Ok(())
+    }
+
+    fn display(&self, index: usize) -> String {
+        format!(
+            "[{}] {} -> {}@{}:{} (dirs: {})",
+            index,
+            self.directories.join(", "),
+            self.remote_user,
+            self.remote_host,
+            self.remote_base,
+            self.directories.len()
+        )
+    }
+}
 
 #[derive(Debug, Clone)]
 struct SyncConfig {
@@ -32,9 +97,9 @@ impl SyncConfig {
         };
 
         Self {
-            remote_user: args.remote_user.clone(),
-            remote_host: args.remote_host.clone(),
-            remote_base: args.remote_base.clone(),
+            remote_user: args.remote_user.as_ref().unwrap().clone(),
+            remote_host: args.remote_host.as_ref().unwrap().clone(),
+            remote_base: args.remote_base.as_ref().unwrap().clone(),
             ssh_key,
             debounce_seconds: args.debounce,
             exclude_patterns: vec![
@@ -639,19 +704,19 @@ fn classify_change(path: &Path, root: &Path, watched_dirs: &[PathBuf]) -> Option
 #[command(name = "husync")]
 #[command(about = "Sync local directories to remote via rsync with file watching")]
 struct Args {
-    #[arg(required = true, num_args = 1.., help = "Local directories to watch and sync")]
+    #[arg(num_args = 0.., help = "Local directories to watch and sync")]
     directories: Vec<String>,
 
-    #[arg(long, required = true, help = "Remote SSH username")]
-    remote_user: String,
+    #[arg(long, help = "Remote SSH username")]
+    remote_user: Option<String>,
 
-    #[arg(long, required = true, help = "Remote host or IP")]
-    remote_host: String,
+    #[arg(long, help = "Remote host or IP")]
+    remote_host: Option<String>,
 
-    #[arg(long, required = true, help = "Remote base directory path")]
-    remote_base: String,
+    #[arg(long, help = "Remote base directory path")]
+    remote_base: Option<String>,
 
-    #[arg(long, required = true, help = "Debounce seconds before triggering sync")]
+    #[arg(long, default_value = "2.0", help = "Debounce seconds before triggering sync")]
     debounce: f64,
 
     #[arg(long, default_value = "~/.ssh/id_rsa", help = "SSH private key file path")]
@@ -659,13 +724,112 @@ struct Args {
 
     #[arg(short = 'v', long, help = "Enable verbose rsync logs")]
     verbose: bool,
+
+    #[arg(long, help = "Resume from saved configuration")]
+    resume: bool,
+}
+
+fn select_saved_config() -> Result<SavedConfig, String> {
+    let configs = SavedConfig::load_all()?;
+    
+    if configs.is_empty() {
+        return Err("No saved configurations found".to_string());
+    }
+    
+    println!("{}", "=".repeat(60));
+    println!("Saved configurations:");
+    println!("{}", "-".repeat(60));
+    
+    for (i, config) in configs.iter().enumerate() {
+        println!("{}", config.display(i + 1));
+    }
+    
+    println!("{}", "-".repeat(60));
+    print!("Select configuration (1-{}): ", configs.len());
+    io::stdout().flush().map_err(|e| format!("failed to flush: {}", e))?;
+    
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).map_err(|e| format!("failed to read input: {}", e))?;
+    
+    let index: usize = input.trim().parse()
+        .map_err(|_| "Invalid selection".to_string())?;
+    
+    if index < 1 || index > configs.len() {
+        return Err("Selection out of range".to_string());
+    }
+    
+    Ok(configs[index - 1].clone())
 }
 
 fn main() {
     colored::control::set_override(true);
     
     let args = Args::parse();
-    let config = SyncConfig::new(&args);
+    
+    let (directories, remote_user, remote_host, remote_base, ssh_key, debounce, verbose) = if args.resume {
+        match select_saved_config() {
+            Ok(config) => (
+                config.directories,
+                config.remote_user,
+                config.remote_host,
+                config.remote_base,
+                config.ssh_key,
+                config.debounce,
+                config.verbose,
+            ),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        if args.directories.is_empty() {
+            eprintln!("Error: directories are required");
+            std::process::exit(1);
+        }
+        if args.remote_user.is_none() || args.remote_host.is_none() || args.remote_base.is_none() {
+            eprintln!("Error: --remote-user, --remote-host, and --remote-base are required");
+            std::process::exit(1);
+        }
+        (
+            args.directories,
+            args.remote_user.unwrap(),
+            args.remote_host.unwrap(),
+            args.remote_base.unwrap(),
+            args.ssh_key,
+            args.debounce,
+            args.verbose,
+        )
+    };
+    
+    // Save this configuration
+    let saved_config = SavedConfig {
+        directories: directories.clone(),
+        remote_user: remote_user.clone(),
+        remote_host: remote_host.clone(),
+        remote_base: remote_base.clone(),
+        debounce,
+        ssh_key: ssh_key.clone(),
+        verbose,
+    };
+    
+    if let Err(e) = saved_config.save() {
+        eprintln!("Warning: failed to save config: {}", e);
+    }
+    
+    // Create a temporary Args-like structure for SyncConfig
+    let effective_args = Args {
+        directories: directories.clone(),
+        remote_user: Some(remote_user),
+        remote_host: Some(remote_host),
+        remote_base: Some(remote_base),
+        ssh_key,
+        debounce,
+        verbose,
+        resume: false,
+    };
+    
+    let config = SyncConfig::new(&effective_args);
 
     let mut sync = match DirectorySync::new(config) {
         Ok(s) => s,
@@ -675,7 +839,7 @@ fn main() {
         }
     };
 
-    for d in &args.directories {
+    for d in &directories {
         sync.add_watch(d);
     }
 

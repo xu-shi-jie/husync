@@ -1,6 +1,6 @@
 [package]
 name = "husync"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 authors = ["xu-shi-jie"]
 description = "Real-time directory sync tool with file watching and colored output"
@@ -17,3 +17,5 @@ colored = "2"
 ctrlc = "3"
 notify = "6"
 wait-timeout = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
