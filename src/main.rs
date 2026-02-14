@@ -79,14 +79,8 @@ fn colorize_message(msg: &str) -> ColoredString {
         msg.red().bold()
     } else if msg.starts_with("WARN") {
         msg.yellow()
-    } else if msg.starts_with("OK") {
+    } else if msg.starts_with("OK") || msg.starts_with("WATCH") || msg.starts_with("Starting") || msg.starts_with("Initial") || msg.starts_with("Syncing") {
         msg.green()
-    } else if msg.starts_with("WATCH") {
-        msg.cyan()
-    } else if msg.starts_with("Starting") || msg.starts_with("Initial") {
-        msg.green()
-    } else if msg.starts_with("Syncing") {
-        msg.blue()
     } else {
         msg.normal()
     }
@@ -668,6 +662,8 @@ struct Args {
 }
 
 fn main() {
+    colored::control::set_override(true);
+    
     let args = Args::parse();
     let config = SyncConfig::new(&args);
 
