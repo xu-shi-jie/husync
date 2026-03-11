@@ -1,8 +1,8 @@
 [package]
 name = "husync"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
-authors = ["xu-shi-jie"]
+authors = ["Shijie Xu"]
 description = "Real-time directory sync tool with file watching and colored output"
 license = "MIT"
 repository = "https://github.com/xu-shi-jie/husync"

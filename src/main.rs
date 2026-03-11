@@ -400,6 +400,32 @@ fn decode_watch_spec(spec: &str) -> (PathBuf, WatchMode) {
     }
 }
 
+fn filter_existing_watch_specs(specs: &[String]) -> Vec<String> {
+    let mut filtered = Vec::new();
+    let mut seen = HashSet::new();
+
+    for spec in specs {
+        let (path, mode) = decode_watch_spec(spec);
+        let canonical = match path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let is_valid = match mode {
+            WatchMode::Recursive | WatchMode::FilesOnly => canonical.is_dir(),
+            WatchMode::SingleFile => canonical.is_file(),
+        };
+        if !is_valid {
+            continue;
+        }
+        let normalized = encode_watch_spec(&canonical, mode);
+        if seen.insert(normalized.clone()) {
+            filtered.push(normalized);
+        }
+    }
+
+    filtered
+}
+
 struct DirectorySync {
     config: SyncConfig,
     display: ScrollingDisplay,
@@ -1177,6 +1203,7 @@ fn classify_change(path: &Path, root: &Path, watched_dirs: &[PathBuf]) -> Option
 #[derive(Parser, Debug)]
 #[command(name = "husync")]
 #[command(about = "Sync local directories to remote via rsync with file watching")]
+#[command(disable_version_flag = true)]
 struct Args {
     #[arg(num_args = 0.., help = "Local directories to watch and sync")]
     directories: Vec<String>,
@@ -1196,8 +1223,11 @@ struct Args {
     #[arg(long, default_value = "~/.ssh/id_rsa", help = "SSH private key file path")]
     ssh_key: String,
 
-    #[arg(short = 'v', long, help = "Enable verbose rsync logs")]
+    #[arg(long, help = "Enable verbose rsync logs")]
     verbose: bool,
+
+    #[arg(short = 'v', long, help = "Show version and exit")]
+    version: bool,
 
     #[arg(long, default_value = "300", help = "Maximum rsync timeout in seconds")]
     timeout_max: u64,
@@ -1309,8 +1339,12 @@ fn run_directory_picker(start: PathBuf, preselected: &[String]) -> Result<Vec<St
     let mut terminal = Terminal::new(backend).map_err(|e| format!("failed to create terminal: {}", e))?;
     terminal.clear().map_err(|e| format!("failed to clear terminal: {}", e))?;
 
-    let mut current = start.canonicalize().map_err(|e| format!("failed to resolve start path: {}", e))?;
+    let current = start
+        .canonicalize()
+        .or_else(|_| start.clone().canonicalize())
+        .map_err(|e| format!("failed to resolve start path: {}", e))?;
     let base_root = current.clone();
+    let mut current = current;
     let mut entries = list_entries(&current)?;
     let mut cursor = 0usize;
     let mut selected: HashSet<(PathBuf, WatchMode)> = HashSet::new();
@@ -1327,6 +1361,13 @@ fn run_directory_picker(start: PathBuf, preselected: &[String]) -> Result<Vec<St
     }
     let mut hint = String::new();
     let palette = picker_palette();
+    let mut pending_g_at: Option<Instant> = None;
+
+    // Drop any buffered keypresses (most commonly the shell Enter used to launch husync)
+    // so the picker does not immediately open the first child entry.
+    while event::poll(Duration::from_millis(0)).map_err(|e| format!("event poll error: {}", e))? {
+        let _ = event::read().map_err(|e| format!("event read error: {}", e))?;
+    }
 
     let result = (|| -> Result<Vec<String>, String> {
         loop {
@@ -1348,7 +1389,7 @@ fn run_directory_picker(start: PathBuf, preselected: &[String]) -> Result<Vec<St
                         .split(size);
 
                     let header = Paragraph::new(vec![
-                        Line::from("SPACE: toggle | ENTER: open | BACKSPACE: up | c: confirm | q: cancel"),
+                        Line::from("j/k or arrows: move | gg/G: top/bottom | SPACE: toggle | ENTER: open | BACKSPACE: up | c: confirm | q: cancel"),
                         Line::from(format!("Current: {}", current.display())),
                     ])
                     .style(Style::default().fg(palette.text))
@@ -1449,19 +1490,43 @@ fn run_directory_picker(start: PathBuf, preselected: &[String]) -> Result<Vec<St
 
             let ev = event::read().map_err(|e| format!("event read error: {}", e))?;
             if let CtEvent::Key(key) = ev {
+                if let Some(ts) = pending_g_at {
+                    if ts.elapsed() > Duration::from_millis(600) {
+                        pending_g_at = None;
+                    }
+                }
                 match key.code {
-                    KeyCode::Up => {
+                    KeyCode::Up | KeyCode::Char('k') => {
                         hint.clear();
+                        pending_g_at = None;
                         cursor = cursor.saturating_sub(1);
                     }
-                    KeyCode::Down => {
+                    KeyCode::Down | KeyCode::Char('j') => {
                         hint.clear();
+                        pending_g_at = None;
                         if cursor + 1 < entries.len() {
                             cursor += 1;
                         }
                     }
+                    KeyCode::Char('g') => {
+                        hint.clear();
+                        if pending_g_at.is_some() {
+                            cursor = 0;
+                            pending_g_at = None;
+                        } else {
+                            pending_g_at = Some(Instant::now());
+                        }
+                    }
+                    KeyCode::Char('G') => {
+                        hint.clear();
+                        pending_g_at = None;
+                        if !entries.is_empty() {
+                            cursor = entries.len() - 1;
+                        }
+                    }
                     KeyCode::Char(' ') => {
                         hint.clear();
+                        pending_g_at = None;
                         if let Some(dir) = entries.get(cursor) {
                             let mode = if dir.is_dir {
                                 WatchMode::Recursive
@@ -1478,6 +1543,7 @@ fn run_directory_picker(start: PathBuf, preselected: &[String]) -> Result<Vec<St
                     }
                     KeyCode::Enter => {
                         hint.clear();
+                        pending_g_at = None;
                         if let Some(dir) = entries.get(cursor) {
                             if !dir.is_dir {
                                 hint = "This is a file; ENTER only opens folders.".to_string();
@@ -1500,7 +1566,10 @@ fn run_directory_picker(start: PathBuf, preselected: &[String]) -> Result<Vec<St
                     }
                     KeyCode::Backspace => {
                         hint.clear();
-                        if let Some(parent) = current.parent() {
+                        pending_g_at = None;
+                        if current == base_root {
+                            hint = "Already at the project root.".to_string();
+                        } else if let Some(parent) = current.parent() {
                             current = parent.to_path_buf();
                             entries = list_entries(&current)?;
                             cursor = 0;
@@ -1508,6 +1577,7 @@ fn run_directory_picker(start: PathBuf, preselected: &[String]) -> Result<Vec<St
                     }
                     KeyCode::Char('c') => {
                         hint.clear();
+                        pending_g_at = None;
                         if selected.is_empty() {
                             hint = "No directory selected yet.".to_string();
                         } else {
@@ -1520,6 +1590,7 @@ fn run_directory_picker(start: PathBuf, preselected: &[String]) -> Result<Vec<St
                         }
                     }
                     KeyCode::Char('q') => {
+                        pending_g_at = None;
                         return Err("directory selection cancelled".to_string());
                     }
                     _ => {}
@@ -1541,13 +1612,31 @@ fn main() {
 
     let args = Args::parse();
 
+    if args.version {
+        let author = env!("CARGO_PKG_AUTHORS").replace(':', ", ");
+        let build_date = option_env!("HUSYNC_BUILD_DATE").unwrap_or("unknown");
+        println!(
+            "{} v{} by {}, built on {}. Distributed under the {} License.",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+            author,
+            build_date,
+            env!("CARGO_PKG_LICENSE"),
+        );
+        return;
+    }
+
     let project_root = SavedConfig::current_project_root().unwrap_or_default();
     let history = SavedConfig::load_all().unwrap_or_default();
-    let last_for_project = history
+    let mut last_for_project = history
         .iter()
         .rev()
         .find(|c| c.project_root == project_root)
         .cloned();
+
+    if let Some(cfg) = &mut last_for_project {
+        cfg.directories = filter_existing_watch_specs(&cfg.directories);
+    }
 
     let remote_user = if let Some(v) = args.remote_user.clone() {
         v
@@ -1594,6 +1683,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let directories = filter_existing_watch_specs(&directories);
 
     let ssh_key = args.ssh_key;
     let debounce = args.debounce;
@@ -1626,6 +1716,7 @@ fn main() {
         ssh_key,
         debounce,
         verbose,
+        version: false,
         timeout_max,
     };
     
